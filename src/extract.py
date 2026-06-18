@@ -7,6 +7,7 @@ import logging
 
 from src.file_utils import is_file_ready
 from src.extractors.python import extract_python
+from src.extractors.go import extract_go
 
 LANG_CONFIG = {
     "cpp": {
@@ -557,6 +558,8 @@ def extract_functions_from_file(filepath, lang_key):
 
     if lang_key == "python":
         raw_funcs = extract_python(lines, lang_cfg)
+    elif lang_key == "go":
+        raw_funcs = extract_go(lines, lang_cfg)
     elif lang_cfg["body"] == "brace":
         raw_funcs = _extract_functions_brace(lines, lang_key, lang_cfg)
     else:
