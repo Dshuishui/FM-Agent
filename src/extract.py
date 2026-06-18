@@ -6,6 +6,7 @@ import shutil
 import logging
 
 from src.file_utils import is_file_ready
+from src.extractors.python import extract_python
 
 LANG_CONFIG = {
     "cpp": {
@@ -554,7 +555,9 @@ def extract_functions_from_file(filepath, lang_key):
     # Normalize line endings
     lines = [l.rstrip('\n').rstrip('\r') for l in lines]
 
-    if lang_cfg["body"] == "brace":
+    if lang_key == "python":
+        raw_funcs = extract_python(lines, lang_cfg)
+    elif lang_cfg["body"] == "brace":
         raw_funcs = _extract_functions_brace(lines, lang_key, lang_cfg)
     else:
         raw_funcs = _extract_functions_indent(lines, lang_cfg)
