@@ -759,13 +759,18 @@ def try_codegraph_init(proj_dir: str, force: bool = True) -> None:
         # symlink and ignore_errors=True swallowed the error, so the run reported a
         # rebuild that never happened.
         action = "index"
-        print("[Pipeline] Rebuilding codegraph index for current working tree...")
+        what = "Rebuilding codegraph index for current working tree"
     else:
         # `index` rebuilds an initialized project and errors out otherwise, so the
         # first build still goes through `init`.
         action = "init"
-        print("[Pipeline] Building codegraph index...")
+        what = "Building codegraph index"
+    # Name the version that actually builds this index — a machine can hold
+    # several codegraph installs, and the log is where a call graph's provenance
+    # has to be recoverable from.
     cmd = _codegraph_cmd()
+    version = _codegraph_version_at(cmd)
+    print(f"[Pipeline] {what} (codegraph {version or 'version unknown'})...")
     try:
         result = subprocess.run(
             [cmd, action], cwd=proj_dir, capture_output=True, text=True
