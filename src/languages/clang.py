@@ -1,6 +1,7 @@
 """Clang-backed call edges for C and C++ with codegraph-compatible FQNs."""
 
 import json
+import logging
 import math
 import os
 import shlex
@@ -11,6 +12,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from src.languages.codegraph import _node_fqn_map
+
+logger = logging.getLogger(__name__)
 
 _CLANG_CACHE = {}
 _FUNCTION_KINDS = {
@@ -102,7 +105,6 @@ def _clang_function_fqns(extractor, root: Path, language: str):
 
     functions = defaultdict(list)
     all_fqns = set()
-    indexed_files = set()
     for node_id, file_path, start_line, end_line, start_column, end_column in rows:
         fqn = fqn_of.get(node_id)
         if not fqn:
@@ -119,11 +121,8 @@ def _clang_function_fqns(extractor, root: Path, language: str):
         canonical = _canonical_relative(root / file_path, root)
         if canonical:
             functions.setdefault(canonical, functions[logical])
-            indexed_files.add(canonical)
-        else:
-            indexed_files.add(logical)
         all_fqns.add(fqn)
-    return functions, all_fqns, indexed_files
+    return functions, all_fqns
 
 
 def _function_at(entries, line: int, column: int | None = None):
@@ -419,14 +418,13 @@ def _constructor_declaration_key(node):
     return name.split("<", 1)[0].strip(), signature
 
 
-def _clang_edges_from_asts(asts, root: Path, functions, all_fqns, indexed_files):
+def _clang_edges_from_asts(asts, root: Path, functions):
     declaration_symbols = {}
     declaration_fqns = {}
     symbol_fqns = defaultdict(set)
     constructor_fqns = defaultdict(set)
     calls = []
     covered_fqns = set()
-    covered_files = set()
     source_cache = {}
 
     def walk(node, task_index, directory, inherited_file, caller_fqn):
@@ -437,8 +435,9 @@ def _clang_edges_from_asts(asts, root: Path, functions, all_fqns, indexed_files)
         node_file = _location_file(location, root, directory, inherited_file)
         active_caller = caller_fqn
         is_function = kind in _FUNCTION_KINDS
+        is_mappable_function = is_function and not node.get("isImplicit", False)
 
-        if is_function:
+        if is_mappable_function:
             line, column = _location_position(location, root, node_file, source_cache)
             match = (
                 _function_at(functions.get(node_file, ()), line, column)
@@ -453,8 +452,6 @@ def _clang_edges_from_asts(asts, root: Path, functions, all_fqns, indexed_files)
             if match is not None:
                 active_caller = match[4]
                 covered_fqns.add(match[4])
-                if node_file is not None:
-                    covered_files.add(node_file)
                 if key is not None:
                     declaration_fqns[key] = match[4]
                 if symbol is not None:
@@ -507,9 +504,7 @@ def _clang_edges_from_asts(asts, root: Path, functions, all_fqns, indexed_files)
     for task_index, (ast, source, directory) in enumerate(asts):
         relative = _canonical_relative(source, root)
         walk(ast, task_index, directory, relative, None)
-
-    if all_fqns and (not covered_fqns or not indexed_files <= covered_files):
-        return None
+        del ast
 
     output = []
     seen = set()
@@ -554,6 +549,24 @@ def _clang_edges_from_asts(asts, root: Path, functions, all_fqns, indexed_files)
             edge["span"]["start_column"] or 0,
         )
     )
+    return output, covered_fqns
+
+
+def _merge_call_edges(clang_edges, codegraph_edges, covered_fqns):
+    """Use Clang for matched callers and codegraph for all other callers."""
+    output = list(clang_edges)
+    output.extend(
+        edge
+        for edge in codegraph_edges
+        if edge.get("caller") not in covered_fqns
+    )
+    output.sort(
+        key=lambda edge: (
+            edge.get("span", {}).get("file") or "",
+            edge.get("span", {}).get("start_line") or 0,
+            edge.get("span", {}).get("start_column") or 0,
+        )
+    )
     return output
 
 
@@ -576,10 +589,11 @@ def _cache_key(root: Path, extractor, language: str, command, database_path):
 
 
 def call_edges(proj_dir: str, language: str, extractor):
-    """Return Clang-resolved edges, or ``None`` to use codegraph."""
+    """Return per-function Clang edges with codegraph fallback."""
     root = Path(extractor._db).resolve().parent.parent
     command = _clang_command(language)
     if command is None:
+        logger.info("Clang unavailable for %s; using codegraph", language)
         return None
     database_path = _compile_database_path(root)
     cache_key = _cache_key(root, extractor, language, command, database_path)
@@ -588,27 +602,43 @@ def call_edges(proj_dir: str, language: str, extractor):
 
     indexed = _clang_function_fqns(extractor, root, language)
     if indexed is None:
+        logger.info("Cannot read indexed %s functions; using codegraph", language)
         result = None
     else:
-        functions, all_fqns, indexed_files = indexed
+        functions, all_fqns = indexed
         tasks = _clang_tasks(root, language, functions, database_path)
         if tasks is None or (all_fqns and not tasks):
+            logger.info("Cannot prepare Clang %s tasks; using codegraph", language)
             result = None
         elif not all_fqns:
             result = []
         else:
-            asts = []
             timeout = _clang_timeout()
-            for task in tasks:
-                ast = _run_clang_ast(command, task, language, timeout)
-                if ast is None:
-                    asts = None
-                    break
-                asts.append((ast, task[0], task[1]))
-            result = (
-                _clang_edges_from_asts(asts, root, functions, all_fqns, indexed_files)
-                if asts is not None
-                else None
+            task_stats = {"succeeded": 0, "failed": 0}
+
+            def parsed_asts():
+                for task in tasks:
+                    ast = _run_clang_ast(command, task, language, timeout)
+                    if ast is None:
+                        task_stats["failed"] += 1
+                        logger.debug("Clang failed to parse %s", task[0])
+                        continue
+                    task_stats["succeeded"] += 1
+                    yield ast, task[0], task[1]
+                    del ast
+
+            clang_edges, covered_fqns = _clang_edges_from_asts(
+                parsed_asts(), root, functions
+            )
+            codegraph_edges = extractor.get_call_edges(language)
+            result = _merge_call_edges(
+                clang_edges, codegraph_edges, covered_fqns
+            )
+            print(
+                f"[Clang] {language}: covered {len(covered_fqns)}/"
+                f"{len(all_fqns)} functions from {task_stats['succeeded']}/"
+                f"{len(tasks)} translation units; codegraph covered "
+                f"{len(all_fqns - covered_fqns)} functions."
             )
 
     if cache_key is not None:

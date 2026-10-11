@@ -28,6 +28,6 @@ OpenCode setup.
 | `OPENCODE_TIMEOUT_SECONDS`      | `1800`                         | Hard timeout (in seconds) for a single `opencode run` subprocess; on expiry the child is killed and the call is retried |
 | `CLANG_COMMAND`                 | `clang` / `clang++`            | Clang driver used for C/C++ call-graph analysis; the language-specific default is selected automatically |
 | `CLANG_COMPILE_COMMANDS`        | unset                          | Optional path to `compile_commands.json` or its directory; otherwise the project root and `build/` are checked |
-| `CLANG_TIMEOUT_SECONDS`         | `120`                          | Timeout for each Clang translation-unit AST export before falling back to codegraph |
+| `CLANG_TIMEOUT_SECONDS`         | `120`                          | Timeout for each Clang translation-unit AST export; functions not covered by successful exports use codegraph |
 | `ELP_COMMAND`                   | `elp`                          | ELP executable or command used for Erlang function and call-graph analysis |
 | `ELP_TIMEOUT_SECONDS`           | `180`                          | Timeout for ELP initialization, indexing, and individual LSP requests |
