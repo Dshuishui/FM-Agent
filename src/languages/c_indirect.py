@@ -12,7 +12,7 @@ Locations are field-based and context-insensitive:
 - a global variable (static ones qualified by their file), a local variable,
 - the i-th parameter and the return value of a function,
 - a struct field, keyed by struct name and field name (all fields of a union
-  are one location).
+  are one location; an unnamed struct is named by where it is declared).
 
 Facts from every translation unit are merged, so a callback registered in one
 file and called in another is connected. A call whose location receives no
@@ -343,10 +343,10 @@ class _TranslationUnit:
     def declarations(self, ast):
         self.last_file = None
         self._declare(ast, in_function=False)
-        for record_id, info in self.records.items():
+        for info in self.records.values():
             if "fields" not in info:
                 continue
-            name = info.get("name") or info.get("typedef") or f"anonymous:{record_id}"
+            name = info.get("name") or info.get("typedef") or f"<anonymous at {info['declared_at']}>"
             for field_id, field_name in info["fields"]:
                 self.fields[field_id] = ("f", name, "*" if info["union"] else field_name)
 
@@ -385,6 +385,12 @@ class _TranslationUnit:
             # definition may supply the field order for initializers.
             if node.get("name") and complete:
                 self.record_by_name[node["name"]] = node["id"]
+            if not node.get("name"):
+                # An unnamed struct is keyed by where it is declared, which is
+                # the same in every translation unit that includes it.
+                relative = self._relative(current)
+                line, _ = _clang._location_position(node.get("loc"), self.analysis.root, relative, {})
+                info["declared_at"] = f"{relative or current}:{line}"
         elif kind == "TypedefDecl":
             record_id = _typedef_record(node)
             if record_id is not None:
