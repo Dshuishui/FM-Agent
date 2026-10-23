@@ -53,6 +53,7 @@ from .generate_batch_prompts import (
 from .opencode_trace import run_opencode_traced
 from .llm_client import _llm_provider_client, _llm_json_call, build_llm_cli_command
 from .scope import _parse_issue_signals, rank_functions_in_file
+from .languages import c_indirect
 from .languages.codegraph import CodeGraphExtractor, try_codegraph_init
 from .languages.registry import (
     extract_incremental_sources,
@@ -882,6 +883,14 @@ def run_incremental_pipeline(
     extra_call_edges = load_call_edges(extra_call_edges_path)
 
     _setup_incremental_logging(work_dir)
+    if c_indirect.is_enabled():
+        # Shared expectations written for indirect call sites are not yet
+        # reconciled when a target changes, so this mode keeps to direct edges.
+        c_indirect.set_enabled(False)
+        logging.info(
+            "[Incremental] Indirect-call analysis is not supported in incremental "
+            "mode yet; using direct call edges only."
+        )
     staged_knowledge = stage_domain_knowledge_files(
         proj_dir, work_dir, domain_knowledge_files
     )

@@ -553,13 +553,22 @@ def _clang_edges_from_asts(asts, root: Path, functions):
 
 
 def _merge_call_edges(clang_edges, codegraph_edges, covered_fqns):
-    """Use Clang for matched callers and codegraph for all other callers."""
+    """Use Clang for matched callers and codegraph for all other callers.
+
+    Clang's AST names only the direct callee of a call, so a call through a
+    function pointer yields no Clang edge. codegraph's function-pointer
+    dispatch edges are kept even for Clang-covered callers.
+    """
     output = list(clang_edges)
-    output.extend(
-        edge
-        for edge in codegraph_edges
-        if edge.get("caller") not in covered_fqns
-    )
+    seen = {(edge.get("caller"), edge.get("callee")) for edge in clang_edges}
+    for edge in codegraph_edges:
+        if edge.get("caller") not in covered_fqns:
+            output.append(edge)
+        elif edge.get("synthesized") == "fn-pointer-dispatch":
+            pair = (edge.get("caller"), edge.get("callee"))
+            if pair not in seen:
+                seen.add(pair)
+                output.append(edge)
     output.sort(
         key=lambda edge: (
             edge.get("span", {}).get("file") or "",

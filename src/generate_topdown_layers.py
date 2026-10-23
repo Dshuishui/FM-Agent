@@ -2,12 +2,18 @@ import json
 import os
 import re
 import logging
+import shutil
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 
 from src.extract import EXT_TO_LANG, LANG_CONFIG
 from src.file_utils import _is_metadata_sidecar
+from src.languages.c_indirect import (
+    LARGE_SITE_THRESHOLD,
+    indirect_call_edges,
+    sites_by_caller,
+)
 from src.languages.registry import call_edges_all
 from src.specification import SOFTWARE_PROFILE, SpecificationProfile
 
@@ -309,6 +315,15 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_cal
         for fqns in effective_stem_to_fqns.values()
         for fqn in fqns
     }
+    # A call through a C function pointer names no callee in the source text.
+    # c_indirect resolves such calls and supplies them as supplemental edges,
+    # so every mode that builds a call graph here sees them.
+    indirect_edges = [
+        edge for edge in indirect_call_edges(proj_dir)
+        if edge.callee.fqn in known_fqns
+    ]
+    if indirect_edges:
+        extra_call_edges = [*(extra_call_edges or ()), *indirect_edges]
     extra_edges_by_caller_fqn, extra_edges_by_callsite = _resolve_extra_call_edges(
         extra_call_edges,
         phase_fqns=phase_fqns,
@@ -661,6 +676,129 @@ def _compute_layers(phase_fqns, callees_map, callers_map):
 # Main entry point
 # ---------------------------------------------------------------------------
 
+_INDIRECT_INDEX_DIR = "indirect_calls"
+
+
+def _layering_maps(phase_fqns, callees_map, callers_map, sites_by_fqn):
+    """Return (callees, callers) for layer ordering, keeping indirect edges acyclic.
+
+    A dispatcher reached back from its own targets (a command table whose
+    commands call the dispatcher again) would merge every target into one
+    cycle layer. Indirect edges therefore order layers only where they do not
+    close a cycle; they are tried in order of fewest targets per call site.
+    All edges stay in the call graph itself.
+    """
+    phase = set(phase_fqns)
+    weak = []
+    for caller, sites in sites_by_fqn.items():
+        if caller not in phase:
+            continue
+        for site in sites:
+            for target in site.targets:
+                if target in phase and target in callees_map.get(caller, ()):
+                    weak.append((len(site.targets), caller, target))
+    if not weak:
+        return callees_map, callers_map
+    weak_pairs = {(caller, target) for _, caller, target in weak}
+
+    strong = {
+        fqn: {t for t in callees_map.get(fqn, ()) if t in phase and (fqn, t) not in weak_pairs}
+        for fqn in phase
+    }
+    component = {}
+    for index, scc in enumerate(_tarjan_scc(phase, strong)):
+        for fqn in scc:
+            component[fqn] = index
+    dag = defaultdict(set)
+    for fqn, targets in strong.items():
+        for target in targets:
+            if component[fqn] != component[target]:
+                dag[component[fqn]].add(component[target])
+
+    def reaches(start, goal):
+        stack, seen = [start], {start}
+        while stack:
+            node = stack.pop()
+            if node == goal:
+                return True
+            for nxt in dag.get(node, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return False
+
+    skipped = 0
+    for _, caller, target in sorted(weak):
+        source, sink = component[caller], component[target]
+        if source == sink or sink in dag[source]:
+            strong[caller].add(target)
+        elif reaches(sink, source):
+            skipped += 1
+        else:
+            dag[source].add(sink)
+            strong[caller].add(target)
+    if skipped:
+        print(
+            f"[TopdownLayers] {skipped} indirect-call edge(s) left out of layer "
+            "ordering because they would close a cycle."
+        )
+    callers = defaultdict(set)
+    for fqn, targets in strong.items():
+        for target in targets:
+            callers[target].add(fqn)
+    return strong, callers
+
+
+def _indirect_call_entries(sites, extracted_files, work_dir):
+    """Describe a function's calls through function pointers for spec prompts.
+
+    A site with more than LARGE_SITE_THRESHOLD targets lists them in an index
+    file under work_dir/indirect_calls/ instead of in the prompt.
+    """
+    entries = []
+    for site in sites:
+        targets = [target for target in site.targets if target in extracted_files]
+        if not targets:
+            continue
+        index = None
+        if len(targets) > LARGE_SITE_THRESHOLD:
+            index = _write_indirect_call_index(site, targets, extracted_files, work_dir)
+        entries.append({
+            "label": site.label,
+            "line": site.line,
+            "targets": targets,
+            "count": len(targets),
+            "index": index,
+        })
+    return entries
+
+
+def _write_indirect_call_index(site, targets, extracted_files, work_dir):
+    """Write one call site's target list; return its path relative to work_dir."""
+    caller_dir = site.caller.replace("::", "__")
+    relative = os.path.join(_INDIRECT_INDEX_DIR, caller_dir, f"L{site.line}.md")
+    path = os.path.join(work_dir, relative)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    prefix = os.path.basename(os.path.normpath(work_dir))
+    lines = [
+        f"# Indirect call `{site.label}` in {site.caller}",
+        "",
+        f"- Call site: {site.file}:{site.line}",
+        f"- Called pointer is read from: {', '.join(site.via) or 'unknown'}",
+        "- Targets: "
+        + ("every function stored there" if site.how == "flow"
+           else "functions of the matching type used as values (no stored value was found)"),
+        f"- {len(targets)} possible targets (extracted function files):",
+        "",
+    ]
+    for target in targets:
+        target_file = os.path.relpath(extracted_files[target], work_dir)
+        lines.append(f"- `{target}`: {prefix}/{target_file}")
+    with open(path, "w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
+    return relative
+
+
 def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None, specification: SpecificationProfile = SOFTWARE_PROFILE):
     """Generate topdown layer JSON files for the specified phases (or all phases).
 
@@ -679,11 +817,19 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
 
     # Build global stem->FQN mapping across ALL phases for all_callees
     global_stem_to_fqns = defaultdict(set)
+    global_files = {}  # fqn -> extracted file, for indirect-call index files
     for pi in phases_data["phases"]:
         for filepath, _ in _collect_phase_files(proj_dir, pi, specification):
             fqn = _file_to_fqn(filepath, proj_dir)
             stem = fqn.split("::")[-1]
             global_stem_to_fqns[stem].add(fqn)
+            global_files.setdefault(fqn, filepath)
+
+    indirect_sites = sites_by_caller(proj_dir)
+    if phase_numbers is None:
+        # A per-phase regeneration keeps the other phases' index files, which
+        # their layer files still reference.
+        shutil.rmtree(os.path.join(proj_dir, _INDIRECT_INDEX_DIR), ignore_errors=True)
 
     output_files = []
 
@@ -714,7 +860,10 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
         phase_fqns = set(file_map.keys())
 
         # 1.5 Compute topological layers
-        layers = _compute_layers(phase_fqns, callees_map, callers_map)
+        layers = _compute_layers(
+            phase_fqns,
+            *_layering_maps(phase_fqns, callees_map, callers_map, indirect_sites),
+        )
 
         # Build phase-specific key names
         phase_callers_key = f"phase{phase_num}_callers"
@@ -758,6 +907,11 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
                 }
                 if info_names_by_caller:
                     entry[phase_info_names_key] = info_names_by_caller
+                indirect_calls = _indirect_call_entries(
+                    indirect_sites.get(fqn, ()), global_files, proj_dir
+                )
+                if indirect_calls:
+                    entry["indirect_calls"] = indirect_calls
                 func_entries.append(entry)
 
             layer_dict["functions"] = func_entries
