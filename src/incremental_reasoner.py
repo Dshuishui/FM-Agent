@@ -53,7 +53,6 @@ from .generate_batch_prompts import (
 from .opencode_trace import run_opencode_traced
 from .llm_client import _llm_provider_client, _llm_json_call, build_llm_cli_command
 from .scope import _parse_issue_signals, rank_functions_in_file
-from .languages import c_indirect
 from .languages.codegraph import CodeGraphExtractor, try_codegraph_init
 from .languages.registry import (
     extract_incremental_sources,
@@ -74,6 +73,10 @@ from .domain_knowledge import (
     load_staged_domain_knowledge_text,
     stage_domain_knowledge_files,
 )
+
+# Shared expectations written for calls through function pointers are not yet
+# reconciled when one target changes, so incremental mode uses direct edges only.
+_INDIRECT_CALLS = False
 
 
 class IncrementalMetadataError(RuntimeError):
@@ -832,7 +835,9 @@ def _topdown_ordered_fqns(work_dir, extra_call_edges=None):
     Regenerates the per-phase topdown-layer JSON files under work_dir/spec_prompts/ as
     a side effect (mirroring run_pipeline's generate_topdown_layers(work_dir) call).
     """
-    generate_topdown_layers(work_dir, extra_call_edges=extra_call_edges)
+    generate_topdown_layers(
+        work_dir, extra_call_edges=extra_call_edges, indirect_calls=_INDIRECT_CALLS
+    )
     phases_data = _load_phases(work_dir)
     spec_prompts_dir = os.path.join(work_dir, "spec_prompts")
 
@@ -883,14 +888,6 @@ def run_incremental_pipeline(
     extra_call_edges = load_call_edges(extra_call_edges_path)
 
     _setup_incremental_logging(work_dir)
-    if c_indirect.is_enabled():
-        # Shared expectations written for indirect call sites are not yet
-        # reconciled when a target changes, so this mode keeps to direct edges.
-        c_indirect.set_enabled(False)
-        logging.info(
-            "[Incremental] Indirect-call analysis is not supported in incremental "
-            "mode yet; using direct call edges only."
-        )
     staged_knowledge = stage_domain_knowledge_files(
         proj_dir, work_dir, domain_knowledge_files
     )
@@ -1046,7 +1043,9 @@ def run_incremental_pipeline(
     logging.info("[Stage 7/10] Generating topdown layers...")
     with open(os.path.join(work_dir, "phases.json"), "r") as f:
         phases_data = json.load(f)
-    generate_topdown_layers(work_dir, extra_call_edges=extra_call_edges)
+    generate_topdown_layers(
+        work_dir, extra_call_edges=extra_call_edges, indirect_calls=_INDIRECT_CALLS
+    )
     logging.info("  -> topdown layers generated for %d phase(s).", len(phases_data.get("phases", [])))
 
     # 8. Collect the scope of functions relevant to the developer intent (the intent file defines the goal of modification).
@@ -1690,6 +1689,7 @@ def _project_call_graph(work_dir, extra_call_edges=None):
         all_files,
         work_dir,
         extra_call_edges=extra_call_edges,
+        indirect_calls=_INDIRECT_CALLS,
     )
     return callees_map, callers_map, file_map, edge_aliases_map
 

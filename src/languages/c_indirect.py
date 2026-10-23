@@ -19,29 +19,21 @@ file and called in another is connected. A call whose location receives no
 function falls back to the functions of the same type that are used as values.
 The analysis reads macro-expanded code, so calls hidden in macros are seen.
 
-Results are exposed as supplemental call edges (``CallEdge``) whose
-``info_names`` are the names a caller's ``.info.json`` entry may use for the
-call site, plus per-call-site metadata for prompt generation.
+Each resolved call site is returned as an ``IndirectSite``; the layer
+generator turns its targets into supplemental call edges named by the site's
+label, so a caller's ``.info.json`` entry for the site reaches every target.
 """
 
-import json
 import logging
 import os
 import re
-import subprocess
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 
-from src.call_graph_edges import CallEdge, CalleeTarget, CallerSelector
 from src.languages import clang as _clang
-from src.languages.codegraph import CodeGraphExtractor
+from src.languages.base import IndirectSite
 
 logger = logging.getLogger(__name__)
-
-# A call site with more targets than this gets an index file instead of a
-# target list in prompts.
-LARGE_SITE_THRESHOLD = 10
 
 _ENV_SWITCH = "FM_AGENT_INDIRECT_CALLS"
 _MAX_ROUNDS = 6
@@ -56,53 +48,26 @@ _TRANSPARENT = {
 }
 _CACHE = {}
 _FAILED = set()
-_enabled_override = None
 
 
-@dataclass(frozen=True)
-class IndirectSite:
-    """One call through a function pointer and the functions it may reach."""
-
-    caller: str
-    label: str
-    short_name: str
-    file: str
-    line: int
-    targets: tuple[str, ...]
-    how: str  # "flow": reached by value flow; "type": matched by function type
-    via: tuple[str, ...] = ()  # where the called pointer is read from, for humans
-
-
-def set_enabled(enabled: bool) -> None:
-    """Force the analysis on or off for this process, overriding the env switch."""
-    global _enabled_override
-    _enabled_override = bool(enabled)
-
-
-def is_enabled() -> bool:
-    if _enabled_override is not None:
-        return _enabled_override
-    return os.environ.get(_ENV_SWITCH, "1").strip() != "0"
-
-
-def analyze(proj_root: str) -> list[IndirectSite]:
+def analyze(extractor) -> list[IndirectSite]:
     """Return the indirect call sites of the project's C code.
 
-    Empty when the analysis is disabled, Clang is unavailable, or the project
+    Empty when FM_AGENT_INDIRECT_CALLS=0, Clang is unavailable, or the project
     has no indexed C functions. Results are cached for the life of the process
     and invalidated when the codegraph index or compilation database changes.
     The analysis only adds edges, so an unexpected failure leaves the call
     graph as it would be without it instead of stopping the run.
     """
-    if not is_enabled():
+    if os.environ.get(_ENV_SWITCH, "1").strip() == "0":
         return []
-    root_key = str(Path(proj_root).resolve())
-    if root_key in _FAILED:
+    root = Path(extractor._db).resolve().parent.parent
+    if root in _FAILED:
         return []
     try:
-        return _analyze(proj_root)
+        return _analyze(extractor, root)
     except Exception as exc:  # noqa: BLE001 - degrade to direct edges only
-        _FAILED.add(root_key)
+        _FAILED.add(root)
         logger.warning(
             "Indirect-call analysis failed (%s: %s); continuing with direct call "
             "edges only.", type(exc).__name__, exc,
@@ -110,14 +75,10 @@ def analyze(proj_root: str) -> list[IndirectSite]:
         return []
 
 
-def _analyze(proj_root: str) -> list[IndirectSite]:
+def _analyze(extractor, root: Path) -> list[IndirectSite]:
     command = _clang._clang_command("c")
     if command is None:
         return []
-    extractor = CodeGraphExtractor.from_proj_dir(str(proj_root))
-    if extractor is None:
-        return []
-    root = Path(extractor._db).resolve().parent.parent
     database_path = _clang._compile_database_path(root)
     cache_key = _clang._cache_key(root, extractor, "c", command, database_path)
     if cache_key is not None and cache_key in _CACHE:
@@ -138,7 +99,7 @@ def _analyze(proj_root: str) -> list[IndirectSite]:
         return []
     include_args = None
     analysis = _Analysis(root, functions)
-    counts = defaultdict(int)
+    parsed = 0
     timeout = _clang._clang_timeout()
     for index, (source, directory, arguments) in enumerate(tasks):
         if not arguments:
@@ -147,19 +108,20 @@ def _analyze(proj_root: str) -> list[IndirectSite]:
             if include_args is None:
                 include_args = [f"-I{path}" for path in _header_dirs(root)]
             arguments = [command[0], *include_args]
-        ast, returncode = _run_ast(command, (source, directory, arguments), timeout)
+        # A translation unit with errors still has an AST for what Clang parsed.
+        ast = _clang._run_clang_ast(
+            command, (source, directory, arguments), "c", timeout, allow_errors=True
+        )
         if ast is None:
-            counts["failed"] += 1
             continue
         try:
             analysis.add_translation_unit(ast, index, directory)
         except Exception as exc:  # noqa: BLE001 - one odd AST must not cost the rest
             logger.debug("Skipped the AST of %s: %s: %s", source, type(exc).__name__, exc)
-            counts["failed"] += 1
             continue
         finally:
             del ast
-        counts["with_errors" if returncode else "clean"] += 1
+        parsed += 1
 
     sites = analysis.solve()
     resolved = defaultdict(int)
@@ -167,41 +129,12 @@ def _analyze(proj_root: str) -> list[IndirectSite]:
         resolved[site.how] += 1
     print(
         f"[IndirectCalls] c: {len(sites)} call sites through function pointers "
-        f"from {counts['clean'] + counts['with_errors']}/{len(tasks)} translation "
-        f"units ({counts['with_errors']} with errors); {resolved['flow']} resolved "
+        f"from {parsed}/{len(tasks)} translation units; {resolved['flow']} resolved "
         f"by value flow, {resolved['type']} by function type, "
         f"{analysis.unresolved} unresolved."
     )
-    if cache_key is not None:
-        for old_key in list(_CACHE):
-            if old_key[:2] == cache_key[:2] and old_key != cache_key:
-                del _CACHE[old_key]
-        _CACHE[cache_key] = sites
+    _clang._cache_result(_CACHE, cache_key, sites)
     return sites
-
-
-def indirect_call_edges(proj_root: str) -> list[CallEdge]:
-    """Return one supplemental edge per (call site, target)."""
-    edges = []
-    for site in analyze(proj_root):
-        info_names = tuple(dict.fromkeys(
-            name for name in (site.label, site.short_name) if name
-        ))
-        source = f"{site.file}:{site.line} via {site.label}"
-        for target in site.targets:
-            edges.append(CallEdge(
-                caller=CallerSelector(fqn=site.caller, callsite_names=()),
-                callee=CalleeTarget(fqn=target, info_names=info_names),
-                source=source,
-            ))
-    return edges
-
-
-def sites_by_caller(proj_root: str) -> dict[str, list[IndirectSite]]:
-    grouped = defaultdict(list)
-    for site in analyze(proj_root):
-        grouped[site.caller].append(site)
-    return dict(grouped)
 
 
 def _header_dirs(root: Path) -> list[str]:
@@ -214,32 +147,6 @@ def _header_dirs(root: Path) -> list[str]:
         if any(name.endswith(".h") for name in filenames):
             found.add(directory)
     return sorted(found)
-
-
-def _run_ast(command, task, timeout: float):
-    """Return (ast, returncode); a Clang error still yields its partial AST."""
-    source, directory, arguments = task
-    argv = [*command, *_clang._clang_arguments(arguments, source, directory, "c")]
-    try:
-        result = subprocess.run(
-            argv,
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None, None
-    if not result.stdout.strip():
-        return None, result.returncode
-    try:
-        ast = json.loads(result.stdout)
-    except (ValueError, RecursionError):
-        return None, result.returncode
-    return (ast if isinstance(ast, dict) else None), result.returncode
 
 
 def _normalize_type(text):
@@ -402,6 +309,7 @@ class _TranslationUnit:
         self.fields = {}           # decl id -> ("f", record, field)
         self.records = {}          # record decl id -> {"name", "union", "fields"}
         self.record_by_name = {}   # struct tag or typedef name -> record decl id
+        self.site_ids = {}         # id() of an indirect CallExpr -> index in analysis.sites
 
     # Clang's JSON prints a file name only when it differs from the previously
     # printed location, so the current file is tracked in print order.
@@ -620,10 +528,11 @@ class _TranslationUnit:
     def _site_id(self, node):
         # Parents are processed before children, so an indirect call whose
         # result flows somewhere gets its id when that value is first read.
-        if "_site" not in node:
-            node["_site"] = len(self.analysis.sites)
+        key = id(node)
+        if key not in self.site_ids:
+            self.site_ids[key] = len(self.analysis.sites)
             self.analysis.sites.append(None)
-        return node["_site"]
+        return self.site_ids[key]
 
     def _direct_callee(self, call):
         expression = _first_child(call)

@@ -295,7 +295,12 @@ def _clang_arguments(
     return result
 
 
-def _run_clang_ast(command, task, language: str, timeout: float):
+def _run_clang_ast(command, task, language: str, timeout: float, allow_errors: bool = False):
+    """Return one translation unit's JSON AST, or None.
+
+    With allow_errors, a unit Clang reports errors in still yields the AST it
+    printed for the code it could parse.
+    """
     source, directory, arguments = task
     argv = [*command, *_clang_arguments(arguments, source, directory, language)]
     try:
@@ -311,11 +316,11 @@ def _run_clang_ast(command, task, language: str, timeout: float):
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if result.returncode != 0 or not result.stdout.strip():
+    if (result.returncode != 0 and not allow_errors) or not result.stdout.strip():
         return None
     try:
         ast = json.loads(result.stdout)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     return ast if isinstance(ast, dict) else None
 
@@ -597,6 +602,16 @@ def _cache_key(root: Path, extractor, language: str, command, database_path):
     )
 
 
+def _cache_result(cache, key, value):
+    """Store value under key, dropping older results for the same language and root."""
+    if key is None:
+        return
+    for old_key in list(cache):
+        if old_key[:2] == key[:2] and old_key != key:
+            del cache[old_key]
+    cache[key] = value
+
+
 def call_edges(proj_dir: str, language: str, extractor):
     """Return per-function Clang edges with codegraph fallback."""
     root = Path(extractor._db).resolve().parent.parent
@@ -650,9 +665,5 @@ def call_edges(proj_dir: str, language: str, extractor):
                 f"{len(all_fqns - covered_fqns)} functions."
             )
 
-    if cache_key is not None:
-        for old_key in list(_CLANG_CACHE):
-            if old_key[:2] == cache_key[:2] and old_key != cache_key:
-                del _CLANG_CACHE[old_key]
-        _CLANG_CACHE[cache_key] = result
+    _cache_result(_CLANG_CACHE, cache_key, result)
     return result

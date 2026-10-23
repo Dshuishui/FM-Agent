@@ -7,14 +7,10 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
 
+from src.call_graph_edges import CallEdge, CalleeTarget, CallerSelector
 from src.extract import EXT_TO_LANG, LANG_CONFIG
 from src.file_utils import _is_metadata_sidecar
-from src.languages.c_indirect import (
-    LARGE_SITE_THRESHOLD,
-    indirect_call_edges,
-    sites_by_caller,
-)
-from src.languages.registry import call_edges_all
+from src.languages.registry import call_edges_all, indirect_call_sites_all
 from src.specification import SOFTWARE_PROFILE, SpecificationProfile
 
 
@@ -271,7 +267,7 @@ def _find_call_sites(text, lang_key, known_stems, keywords):
     return found
 
 
-def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_call_edges=None):
+def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_call_edges=None, indirect_calls=True):
     """Build callees_map and callers_map for a set of phase files.
 
     Args:
@@ -282,6 +278,8 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_cal
         extra_call_edges: optional iterable of supplemental CallEdge objects.
                           caller.fqn is exact; caller.callsite_names are matched
                           only against explicitly listed source callsite names.
+        indirect_calls: add the calls through function pointers that language
+                        backends resolve as supplemental edges.
 
     Returns:
         (callees_map, callers_map, all_callees_map, file_map, module_map,
@@ -315,15 +313,16 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_cal
         for fqns in effective_stem_to_fqns.values()
         for fqn in fqns
     }
-    # A call through a C function pointer names no callee in the source text.
-    # c_indirect resolves such calls and supplies them as supplemental edges,
+    # A call through a function pointer names no callee in the source text.
+    # Language backends resolve such calls; they join the supplemental edges,
     # so every mode that builds a call graph here sees them.
-    indirect_edges = [
-        edge for edge in indirect_call_edges(proj_dir)
-        if edge.callee.fqn in known_fqns
-    ]
-    if indirect_edges:
-        extra_call_edges = [*(extra_call_edges or ()), *indirect_edges]
+    if indirect_calls:
+        indirect_edges = [
+            edge for edge in _indirect_call_edges(indirect_call_sites_all(proj_dir))
+            if edge.callee.fqn in known_fqns
+        ]
+        if indirect_edges:
+            extra_call_edges = [*(extra_call_edges or ()), *indirect_edges]
     extra_edges_by_caller_fqn, extra_edges_by_callsite = _resolve_extra_call_edges(
         extra_call_edges,
         phase_fqns=phase_fqns,
@@ -673,10 +672,34 @@ def _compute_layers(phase_fqns, callees_map, callers_map):
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Calls through function pointers
 # ---------------------------------------------------------------------------
 
 _INDIRECT_INDEX_DIR = "indirect_calls"
+# A call site with more targets than this lists them in an index file instead
+# of in the prompt.
+_LARGE_SITE_THRESHOLD = 10
+
+
+def _indirect_call_edges(sites):
+    """Return one supplemental edge per (call site, target).
+
+    The edge's info names are the site's label, so the caller's .info.json
+    entry for the call site matches every target.
+    """
+    edges = []
+    for site in sites:
+        info_names = tuple(dict.fromkeys(
+            name for name in (site.label, site.short_name) if name
+        ))
+        source = f"{site.file}:{site.line} via {site.label}"
+        for target in site.targets:
+            edges.append(CallEdge(
+                caller=CallerSelector(fqn=site.caller, callsite_names=()),
+                callee=CalleeTarget(fqn=target, info_names=info_names),
+                source=source,
+            ))
+    return edges
 
 
 def _layering_maps(phase_fqns, callees_map, callers_map, sites_by_fqn):
@@ -752,7 +775,7 @@ def _layering_maps(phase_fqns, callees_map, callers_map, sites_by_fqn):
 def _indirect_call_entries(sites, extracted_files, work_dir):
     """Describe a function's calls through function pointers for spec prompts.
 
-    A site with more than LARGE_SITE_THRESHOLD targets lists them in an index
+    A site with more than _LARGE_SITE_THRESHOLD targets lists them in an index
     file under work_dir/indirect_calls/ instead of in the prompt.
     """
     entries = []
@@ -761,7 +784,7 @@ def _indirect_call_entries(sites, extracted_files, work_dir):
         if not targets:
             continue
         index = None
-        if len(targets) > LARGE_SITE_THRESHOLD:
+        if len(targets) > _LARGE_SITE_THRESHOLD:
             index = _write_indirect_call_index(site, targets, extracted_files, work_dir)
         entries.append({
             "label": site.label,
@@ -799,13 +822,19 @@ def _write_indirect_call_index(site, targets, extracted_files, work_dir):
     return relative
 
 
-def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None, specification: SpecificationProfile = SOFTWARE_PROFILE):
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None, specification: SpecificationProfile = SOFTWARE_PROFILE, indirect_calls=True):
     """Generate topdown layer JSON files for the specified phases (or all phases).
 
     Args:
         proj_dir: project root directory
         phase_numbers: list of phase numbers to process, or None for all
         extra_call_edges: optional iterable of supplemental caller/callee edges
+        indirect_calls: include calls through function pointers resolved by
+                        language backends
 
     Returns:
         list of output file paths written
@@ -825,7 +854,10 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
             global_stem_to_fqns[stem].add(fqn)
             global_files.setdefault(fqn, filepath)
 
-    indirect_sites = sites_by_caller(proj_dir)
+    indirect_sites = defaultdict(list)  # caller fqn -> its IndirectSites
+    if indirect_calls:
+        for site in indirect_call_sites_all(proj_dir):
+            indirect_sites[site.caller].append(site)
     if phase_numbers is None:
         # A per-phase regeneration keeps the other phases' index files, which
         # their layer files still reference.
@@ -855,7 +887,8 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
             module_map,
             edge_aliases_map,
         ) = _build_call_graph(
-            phase_files, proj_dir, global_stem_to_fqns, extra_call_edges=extra_call_edges
+            phase_files, proj_dir, global_stem_to_fqns,
+            extra_call_edges=extra_call_edges, indirect_calls=indirect_calls,
         )
         phase_fqns = set(file_map.keys())
 
