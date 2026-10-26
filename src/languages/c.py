@@ -125,7 +125,9 @@ def call_edges(proj_dir: str) -> dict:
     cg = CodeGraphExtractor.from_proj_dir(proj_dir)
     if cg is None:
         return None
-    edges = clang_call_edges(proj_dir, "c", cg)
+    # codegraph links some calls through function pointers that Clang's direct
+    # edges cannot express; keep them for Clang-covered callers too.
+    edges = clang_call_edges(proj_dir, "c", cg, keep_fn_pointer_edges=True)
     return edges if edges is not None else cg.get_call_edges("c")
 
 
