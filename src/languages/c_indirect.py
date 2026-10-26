@@ -398,7 +398,10 @@ class _TranslationUnit:
             self._declare(child, in_function or kind == "FunctionDecl")
 
     def _declare_function(self, node, relative):
-        key = _clang._symbol_key(node, relative)
+        # A redeclaration keeps the first declaration's key: after
+        # `static void f(void);`, a definition `void f(void) {...}` is still
+        # static although its node carries no storage class.
+        key = self.function_keys.get(node.get("previousDecl")) or _clang._symbol_key(node, relative)
         if key is None:
             return
         self.function_keys[node["id"]] = key
