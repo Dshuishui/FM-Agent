@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import logging
+import os
 
 from src.languages import python as _python
 from src.languages import go as _go
@@ -43,7 +44,8 @@ class LanguageHandler:
     extracted-function artifacts should catch it and skip the file instead of
     trusting an empty regex result. indirect_calls resolves calls through
     function pointers, whose callee the source does not name; it returns an
-    empty list when it has nothing to add.
+    empty list when it has nothing to add, and an exception it raises only
+    turns off that language's indirect calls for the rest of the run.
 
     To add a new language:
       1. Create src/languages/<lang>.py implementing batch_extract, call_edges,
@@ -352,15 +354,32 @@ def call_edges_all(proj_dir: str, lang_keys) -> tuple:
     return edges, langs
 
 
+_INDIRECT_CALLS_SWITCH = "FM_AGENT_INDIRECT_CALLS"
+_INDIRECT_CALLS_FAILED = set()  # (lang_key, proj_dir) whose analysis raised
+
+
 def indirect_call_sites_all(proj_dir: str) -> list:
     """Return the calls through function pointers that every backend resolves.
 
     Each item is an IndirectSite. All backends are asked rather than those of
     one phase's files, since a C caller may sit in a header, which counts as
-    C++ by extension.
+    C++ by extension. Empty when FM_AGENT_INDIRECT_CALLS=0. The sites only add
+    edges, so a backend that raises is skipped for the rest of the run, with a
+    warning, and the call graph keeps its direct edges.
     """
+    if os.environ.get(_INDIRECT_CALLS_SWITCH, "1").strip() == "0":
+        return []
     sites = []
-    for handler in REGISTRY.values():
-        if handler.indirect_calls is not None:
+    for lang_key, handler in REGISTRY.items():
+        failure_key = (lang_key, proj_dir)
+        if handler.indirect_calls is None or failure_key in _INDIRECT_CALLS_FAILED:
+            continue
+        try:
             sites.extend(handler.indirect_calls(proj_dir))
+        except Exception as exc:  # noqa: BLE001 - degrade to direct edges only
+            _INDIRECT_CALLS_FAILED.add(failure_key)
+            _logger.warning(
+                "Indirect-call analysis for %s failed (%s: %s); continuing with "
+                "direct call edges only.", lang_key, type(exc).__name__, exc,
+            )
     return sites

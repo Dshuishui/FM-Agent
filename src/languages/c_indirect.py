@@ -35,7 +35,6 @@ from src.languages.base import IndirectSite
 
 logger = logging.getLogger(__name__)
 
-_ENV_SWITCH = "FM_AGENT_INDIRECT_CALLS"
 _MAX_ROUNDS = 6
 _SKIPPED_DIRS = {".git", ".codegraph", "fm_agent", "node_modules"}
 _HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".h++"}
@@ -47,35 +46,16 @@ _TRANSPARENT = {
     "ConstantExpr",
 }
 _CACHE = {}
-_FAILED = set()
 
 
 def analyze(extractor) -> list[IndirectSite]:
     """Return the indirect call sites of the project's C code.
 
-    Empty when FM_AGENT_INDIRECT_CALLS=0, Clang is unavailable, or the project
-    has no indexed C functions. Results are cached for the life of the process
-    and invalidated when the codegraph index or compilation database changes.
-    The analysis only adds edges, so an unexpected failure leaves the call
-    graph as it would be without it instead of stopping the run.
+    Empty when Clang is unavailable or the project has no indexed C functions.
+    Results are cached for the life of the process and invalidated when the
+    codegraph index or compilation database changes.
     """
-    if os.environ.get(_ENV_SWITCH, "1").strip() == "0":
-        return []
     root = Path(extractor._db).resolve().parent.parent
-    if root in _FAILED:
-        return []
-    try:
-        return _analyze(extractor, root)
-    except Exception as exc:  # noqa: BLE001 - degrade to direct edges only
-        _FAILED.add(root)
-        logger.warning(
-            "Indirect-call analysis failed (%s: %s); continuing with direct call "
-            "edges only.", type(exc).__name__, exc,
-        )
-        return []
-
-
-def _analyze(extractor, root: Path) -> list[IndirectSite]:
     command = _clang._clang_command("c")
     if command is None:
         return []
