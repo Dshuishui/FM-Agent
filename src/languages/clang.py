@@ -562,7 +562,8 @@ def _merge_call_edges(clang_edges, codegraph_edges, covered_fqns):
 
     Clang's AST names only the direct callee of a call, so a call through a
     function pointer yields no Clang edge. codegraph's function-pointer
-    dispatch edges are kept even for Clang-covered callers.
+    dispatch edges are kept even for Clang-covered callers, in C and C++
+    alike and whether or not FM_AGENT_INDIRECT_CALLS is set.
     """
     output = list(clang_edges)
     seen = {(edge.get("caller"), edge.get("callee")) for edge in clang_edges}

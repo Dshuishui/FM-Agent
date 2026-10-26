@@ -74,8 +74,9 @@ from .domain_knowledge import (
     stage_domain_knowledge_files,
 )
 
-# Shared expectations written for indirect calls are not yet
-# reconciled when one target changes, so incremental mode uses direct edges only.
+# Shared expectations written for indirect calls are not yet reconciled when
+# one target changes, so incremental mode leaves them out. Function-pointer
+# edges that codegraph finds itself are ordinary call edges and stay.
 _INDIRECT_CALLS = False
 
 
