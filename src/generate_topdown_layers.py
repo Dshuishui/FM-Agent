@@ -940,11 +940,11 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
                 }
                 if info_names_by_caller:
                     entry[phase_info_names_key] = info_names_by_caller
-                indirect_calls = _indirect_call_entries(
+                site_entries = _indirect_call_entries(
                     indirect_sites.get(fqn, ()), global_files, proj_dir
                 )
-                if indirect_calls:
-                    entry["indirect_calls"] = indirect_calls
+                if site_entries:
+                    entry["indirect_calls"] = site_entries
                 func_entries.append(entry)
 
             layer_dict["functions"] = func_entries
