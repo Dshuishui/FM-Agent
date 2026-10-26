@@ -676,7 +676,8 @@ def _compute_layers(phase_fqns, callees_map, callers_map):
 # Indirect calls
 # ---------------------------------------------------------------------------
 
-_INDIRECT_INDEX_DIR = "indirect_calls"
+# Index files live beside the layer files, in a directory only FM-Agent writes.
+_INDIRECT_INDEX_DIR = os.path.join("spec_prompts", "indirect_calls")
 # A call site with more targets than this lists them in an index file instead
 # of in the prompt.
 _LARGE_SITE_THRESHOLD = 10
@@ -777,7 +778,7 @@ def _indirect_call_entries(sites, extracted_files, work_dir):
     """Describe a function's indirect calls for spec prompts.
 
     A site with more than _LARGE_SITE_THRESHOLD targets lists them in an index
-    file under work_dir/indirect_calls/ instead of in the prompt.
+    file under work_dir/spec_prompts/indirect_calls/ instead of in the prompt.
     """
     entries = []
     for site in sites:
