@@ -45,6 +45,9 @@ _TRANSPARENT = {
     "UnaryOperator",
     "ConstantExpr",
 }
+# Clang names the type of an unnamed struct or union by where it is declared:
+# "struct (unnamed struct at src/a.c:5:14)".
+_UNNAMED_RECORD = re.compile(r"\(unnamed(?: struct| union)? at (.+):(\d+):(\d+)\)")
 _CACHE = {}
 
 
@@ -302,6 +305,7 @@ class _TranslationUnit:
         self.fields = {}           # decl id -> ("f", record, field)
         self.records = {}          # record decl id -> {"name", "union", "fields"}
         self.record_by_name = {}   # struct tag or typedef name -> record decl id
+        self.record_by_place = {}  # (file, line, column) of an unnamed record -> decl id
         self.site_ids = {}         # id() of an indirect CallExpr -> index in analysis.sites
 
     # Clang's JSON prints a file name only when it differs from the previously
@@ -382,8 +386,9 @@ class _TranslationUnit:
                 # An unnamed struct is keyed by where it is declared, which is
                 # the same in every translation unit that includes it.
                 relative = self._relative(current)
-                line, _ = _clang._location_position(node.get("loc"), self.analysis.root, relative, {})
+                line, column = _clang._location_position(node.get("loc"), self.analysis.root, relative, {})
                 info["declared_at"] = f"{relative or current}:{line}"
+                self.record_by_place[(relative or current, line, column)] = node["id"]
         elif kind == "TypedefDecl":
             record_id = _typedef_record(node)
             if record_id is not None:
@@ -594,11 +599,17 @@ class _TranslationUnit:
         return set()
 
     def _record_fields(self, type_text):
-        name = re.sub(r"\b(const|volatile|struct|union)\b", "", type_text or "").strip()
-        info = self.records.get(self.record_by_name.get(name)) or {}
-        if not info.get("complete") and info.get("name"):
-            # `typedef struct S S;` may name the forward declaration.
-            info = self.records.get(self.record_by_name.get(info["name"])) or info
+        unnamed = _UNNAMED_RECORD.search(type_text or "")
+        if unnamed:
+            path, line, column = unnamed.groups()
+            place = (self._relative(path) or path, int(line), int(column))
+            info = self.records.get(self.record_by_place.get(place)) or {}
+        else:
+            name = re.sub(r"\b(const|volatile|struct|union)\b", "", type_text or "").strip()
+            info = self.records.get(self.record_by_name.get(name)) or {}
+            if not info.get("complete") and info.get("name"):
+                # `typedef struct S S;` may name the forward declaration.
+                info = self.records.get(self.record_by_name.get(info["name"])) or info
         if "fields" not in info:
             return None
         return [self.fields.get(field_id) for field_id, _ in info["fields"]]
