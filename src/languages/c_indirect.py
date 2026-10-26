@@ -71,6 +71,12 @@ def analyze(extractor) -> list[IndirectSite]:
     if indexed is None or not indexed[1]:
         return []
     functions = indexed[0]
+    # codegraph labels some C headers as C++; their functions still take part
+    # in the C code's calls through pointers.
+    cpp_indexed = _clang._clang_function_fqns(extractor, root, "cpp")
+    for path, entries in (cpp_indexed[0] if cpp_indexed else {}).items():
+        if path not in functions and Path(path).suffix.lower() in _HEADER_SUFFIXES:
+            functions[path] = entries
     # Headers are analyzed through the .c files that include them; parsed on
     # their own they add time (and, in C++ projects, noise) but no new facts.
     tasks = [
