@@ -234,7 +234,7 @@ def detect_lang_and_comment(file_rel: str, ext_to_lang: Dict[str, str]) -> Tuple
 
 
 def _indirect_call_lines(functions: List[dict], fm_agent_prefix: str) -> List[str]:
-    """Prompt section for calls through function pointers.
+    """Prompt section for indirect calls.
 
     Each call site gets one shared expectation in the caller's .info.json,
     named by the site's label; supplemental edges carry that label to every
@@ -254,7 +254,8 @@ def _indirect_call_lines(functions: List[dict], fm_agent_prefix: str) -> List[st
         return []
     lines = [
         "## INDIRECT CALLS",
-        "These units call functions through pointers. Each call may reach any of "
+        "These units make indirect calls: the called function is a value chosen at "
+        "run time (for example a function pointer), so each call may reach any of "
         "its listed targets.",
         "",
     ]

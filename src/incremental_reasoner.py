@@ -74,7 +74,7 @@ from .domain_knowledge import (
     stage_domain_knowledge_files,
 )
 
-# Shared expectations written for calls through function pointers are not yet
+# Shared expectations written for indirect calls are not yet
 # reconciled when one target changes, so incremental mode uses direct edges only.
 _INDIRECT_CALLS = False
 

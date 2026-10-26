@@ -42,8 +42,9 @@ class LanguageHandler:
     file, or raises BackendUnavailableError for languages where a regex
     fallback is unsafe (e.g. Erlang/ELP) — callers that are about to delete
     extracted-function artifacts should catch it and skip the file instead of
-    trusting an empty regex result. indirect_calls resolves calls through
-    function pointers, whose callee the source does not name; it returns an
+    trusting an empty regex result. indirect_calls resolves indirect calls,
+    whose callee is a value chosen at run time (such as a C function
+    pointer) rather than named in the source; it returns an
     empty list when it has nothing to add, and an exception it raises only
     turns off that language's indirect calls for the rest of the run.
 
@@ -359,7 +360,7 @@ _INDIRECT_CALLS_FAILED = set()  # (lang_key, proj_dir) whose analysis raised
 
 
 def indirect_call_sites_all(proj_dir: str) -> list:
-    """Return the calls through function pointers that every backend resolves.
+    """Return the indirect calls that every backend resolves.
 
     Each item is an IndirectSite. All backends are asked rather than those of
     one phase's files, since a C caller may sit in a header, which counts as

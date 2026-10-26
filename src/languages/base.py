@@ -5,10 +5,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class IndirectSite:
-    """One call through a function pointer and the functions it may reach.
+    """One indirect call and the functions it may reach.
 
-    Returned by a language handler's ``indirect_calls``. ``label`` is how the
-    call site is written (the name a caller's .info.json entry uses for it).
+    An indirect call's callee is a value chosen at run time, such as a C
+    function pointer, so the source names no callee. Returned by a language
+    handler's ``indirect_calls``. ``label`` is how the call site is written
+    (the name a caller's .info.json entry uses for it).
     """
 
     caller: str
@@ -18,7 +20,7 @@ class IndirectSite:
     line: int
     targets: tuple[str, ...]
     how: str  # "flow": reached by value flow; "type": matched by function type
-    via: tuple[str, ...] = ()  # where the called pointer is read from, for humans
+    via: tuple[str, ...] = ()  # where the called value is read from, for humans
 
 
 class BackendUnavailableError(RuntimeError):

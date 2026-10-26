@@ -278,8 +278,8 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_cal
         extra_call_edges: optional iterable of supplemental CallEdge objects.
                           caller.fqn is exact; caller.callsite_names are matched
                           only against explicitly listed source callsite names.
-        indirect_calls: add the calls through function pointers that language
-                        backends resolve as supplemental edges.
+        indirect_calls: add the indirect calls that language backends resolve
+                        as supplemental edges.
 
     Returns:
         (callees_map, callers_map, all_callees_map, file_map, module_map,
@@ -313,7 +313,8 @@ def _build_call_graph(phase_files, proj_dir, global_stem_to_fqns=None, extra_cal
         for fqns in effective_stem_to_fqns.values()
         for fqn in fqns
     }
-    # A call through a function pointer names no callee in the source text.
+    # An indirect call (e.g. through a C function pointer) names no callee in
+    # the source text.
     # Language backends resolve such calls; they join the supplemental edges,
     # so every mode that builds a call graph here sees them.
     if indirect_calls:
@@ -672,7 +673,7 @@ def _compute_layers(phase_fqns, callees_map, callers_map):
 
 
 # ---------------------------------------------------------------------------
-# Calls through function pointers
+# Indirect calls
 # ---------------------------------------------------------------------------
 
 _INDIRECT_INDEX_DIR = "indirect_calls"
@@ -773,7 +774,7 @@ def _layering_maps(phase_fqns, callees_map, callers_map, sites_by_fqn):
 
 
 def _indirect_call_entries(sites, extracted_files, work_dir):
-    """Describe a function's calls through function pointers for spec prompts.
+    """Describe a function's indirect calls for spec prompts.
 
     A site with more than _LARGE_SITE_THRESHOLD targets lists them in an index
     file under work_dir/indirect_calls/ instead of in the prompt.
@@ -807,7 +808,7 @@ def _write_indirect_call_index(site, targets, extracted_files, work_dir):
         f"# Indirect call `{site.label}` in {site.caller}",
         "",
         f"- Call site: {site.file}:{site.line}",
-        f"- Called pointer is read from: {', '.join(site.via) or 'unknown'}",
+        f"- Callee is read from: {', '.join(site.via) or 'unknown'}",
         "- Targets: "
         + ("every function stored there" if site.how == "flow"
            else "functions of the matching type used as values (no stored value was found)"),
@@ -833,8 +834,7 @@ def generate_topdown_layers(proj_dir, phase_numbers=None, extra_call_edges=None,
         proj_dir: project root directory
         phase_numbers: list of phase numbers to process, or None for all
         extra_call_edges: optional iterable of supplemental caller/callee edges
-        indirect_calls: include calls through function pointers resolved by
-                        language backends
+        indirect_calls: include indirect calls resolved by language backends
 
     Returns:
         list of output file paths written
