@@ -133,6 +133,14 @@ def _analyze(extractor, root: Path) -> list[IndirectSite]:
         f"by value flow, {resolved['type']} by function type, "
         f"{analysis.unresolved} unresolved."
     )
+    if analysis.lost:
+        names = sorted(set().union(*analysis.lost.values()))
+        shown = ", ".join(names[:5]) + (f", and {len(names) - 5} more" if len(names) > 5 else "")
+        noun = "call site" if len(analysis.lost) == 1 else "call sites"
+        print(
+            f"[IndirectCalls] c: left out targets of {len(analysis.lost)} {noun} "
+            f"because codegraph did not extract them as functions: {shown}."
+        )
     _clang._cache_result(_CACHE, cache_key, sites)
     return sites
 
@@ -191,6 +199,9 @@ class _Analysis:
         self.sites = []                    # raw indirect call sites, by id
         self.sources = {}                  # relative path -> bytes, for labels
         self.unresolved = 0
+        # function key -> name, for definitions codegraph did not extract
+        self.unextracted = {}
+        self.lost = defaultdict(set)       # site key -> names of unextracted targets
 
     # ---- collection ---------------------------------------------------------
 
@@ -268,17 +279,19 @@ class _Analysis:
             if not targets:
                 targets = by_type.get(site["type"], set())
                 how = "type"
+            key = (caller, site["file"], site["line"], site["col"])
             fqns = set()
             for target in targets:
                 fqns |= self.fqns_of.get(target, set())
+                if target in self.unextracted and not self.fqns_of.get(target):
+                    self.lost[key].add(self.unextracted[target])
             fqns.discard(caller)
-            key = (caller, site["file"], site["line"], site["col"])
             if key in merged:
                 previous = merged[key]
                 fqns |= set(previous.targets)
                 how = previous.how if previous.how == "flow" else how
             if not fqns:
-                if key not in merged:
+                if key not in merged and key not in self.lost:
                     self.unresolved += 1
                 continue
             merged[key] = IndirectSite(
@@ -420,6 +433,8 @@ class _TranslationUnit:
             if match is not None:
                 self.analysis.fqns_of[key].add(match[4])
                 self.definition_fqns[node["id"]] = match[4]
+            elif relative is not None:
+                self.analysis.unextracted.setdefault(key, node.get("name"))
 
     # ---- pass 2: flows and call sites --------------------------------------
 
